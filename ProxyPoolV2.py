@@ -13,6 +13,51 @@ class ProxyPoolV2:
     # 代理源注册表：名称 -> 类
     _SOURCES = {}
 
+    # ==================== 自定义代理源基类 ====================
+
+    class CustomProxySource:
+        """
+        自定义代理源基类，继承此类并实现 fetch 方法
+        
+        示例：
+        class MyProxySite(ProxyPoolV2.CustomProxySource):
+            NAME = '我的代理网站'
+            WEIGHT = 4  # 权重越高越优先
+            
+            @classmethod
+            def fetch(cls, region=None, protocols=None):
+                # 你的爬取逻辑
+                proxies = []
+                # ... 爬取代码 ...
+                return proxies  # ['http://ip:port', ...]
+        
+        ProxyPoolV2.register_source(MyProxySite)
+        """
+        NAME = 'CustomProxySource'
+        WEIGHT = 0
+
+        @classmethod
+        def fetch(cls, region=None, protocols=None):
+            """
+            获取代理列表
+            
+            :param region: 'china'/'abroad'/None (地区过滤)
+            :param protocols: ['http']/['https']/['http','https']/None (协议过滤)
+            :return: 代理列表 ['http://ip:port', 'https://ip:port', ...]
+            """
+            raise NotImplementedError('请实现 fetch 方法')
+
+    @classmethod
+    def register_source(cls, source_class):
+        """
+        注册自定义代理源
+        
+        :param source_class: 继承 CustomProxySource 的类
+        """
+        name = getattr(source_class, 'NAME', source_class.__name__)
+        cls._SOURCES[name] = source_class
+        print(f'✅ 已注册代理源：{name} (权重 {getattr(source_class, "WEIGHT", 0)})')
+
     allProxy = []
     availableProxy = []
     _proxyLatency = {}  # proxy -> latency_ms
@@ -456,12 +501,10 @@ class ProxyPoolV2:
             return proxies
 
 
-# 注册代理源
-ProxyPoolV2._SOURCES = {
-    '站大爷代理': ProxyPoolV2.ZdyProxyPool,
-    '六六代理': ProxyPoolV2.SixSixProxyPool,
-    '云代理': ProxyPoolV2.YunProxyPool,
-}
+# 注册内置代理源
+ProxyPoolV2.register_source(ProxyPoolV2.ZdyProxyPool)
+ProxyPoolV2.register_source(ProxyPoolV2.SixSixProxyPool)
+ProxyPoolV2.register_source(ProxyPoolV2.YunProxyPool)
 
 
 if __name__ == '__main__':
