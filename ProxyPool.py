@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-class ProxyPoolV2:
+class ProxyPool:
     SUPPORTFORMAT = ['txt', 'json', 'jsonl']
     # 代理源注册表：名称 -> 类
     _SOURCES = {}
@@ -20,7 +20,7 @@ class ProxyPoolV2:
         自定义代理源基类，继承此类并实现 fetch 方法
         
         示例：
-        class MyProxySite(ProxyPoolV2.CustomProxySource):
+        class MyProxySite(ProxyPool.CustomProxySource):
             NAME = '我的代理网站'
             WEIGHT = 4  # 权重越高越优先
             
@@ -31,7 +31,7 @@ class ProxyPoolV2:
                 # ... 爬取代码 ...
                 return proxies  # ['http://ip:port', ...]
         
-        ProxyPoolV2.register_source(MyProxySite)
+        ProxyPool.register_source(MyProxySite)
         """
         NAME = 'CustomProxySource'
         WEIGHT = 0
@@ -176,7 +176,7 @@ class ProxyPoolV2:
                         continue
 
         print(f'\n共获取 {len(allProxies)} 条不重复代理')
-        ProxyPoolV2.allProxy = allProxies
+        ProxyPool.allProxy = allProxies
         return allProxies
 
     # ==================== 代理检测 ====================
@@ -207,7 +207,7 @@ class ProxyPoolV2:
         target = self.total or len(proxyList)
         total_count = len(proxyList)
         checked = [0]
-        available = ProxyPoolV2.availableProxy
+        available = ProxyPool.availableProxy
         proxyIter = iter(proxyList)
 
         print(f'开始检测 {total_count} 条代理，目标 {target} 条，并发 {maxWorks} 线程')
@@ -232,14 +232,14 @@ class ProxyPoolV2:
                     futures.remove(future)
                     try:
                         res, elapsed = future.result()
-                        with ProxyPoolV2._lock:
+                        with ProxyPool._lock:
                             checked[0] += 1
                             if res is not None:
                                 if len(available) >= target:
                                     return
                                 if res not in available:
                                     available.append(res)
-                                    ProxyPoolV2._proxyLatency[res] = elapsed
+                                    ProxyPool._proxyLatency[res] = elapsed
                                     print(f'✅ {res} ({elapsed:.0f}ms) | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
                                     if len(available) >= target:
                                         print(f'\n✅已达目标数量 {target}')
@@ -388,7 +388,7 @@ class ProxyPoolV2:
             :param region: 'china'/'abroad'/None
             :param protocols: ['http']/['https']/['http','https']/None
             """
-            self = ProxyPoolV2.ZdyProxyPool()
+            self = ProxyPool.ZdyProxyPool()
             proxies = []
             # 协议映射
             proto_map = {'http': 1, 'https': 4}
@@ -415,7 +415,7 @@ class ProxyPoolV2:
                         "protocol_type": protocol_type,
                         "return_type": 3
                     }
-                    headers = {'User-Agent': random.choice(ProxyPoolV2._UALIST)}
+                    headers = {'User-Agent': random.choice(ProxyPool._UALIST)}
                     try:
                         response = requests.get(self.API, params=params, timeout=6, headers=headers)
                         if response.ok:
@@ -443,9 +443,9 @@ class ProxyPoolV2:
 
             for proto in proto_list:
                 params = {'num': '60', 'protocol': proto, 'format': 'json'}
-                headers = {'User-Agent': random.choice(ProxyPoolV2._UALIST)}
+                headers = {'User-Agent': random.choice(ProxyPool._UALIST)}
                 try:
-                    response = requests.get(ProxyPoolV2.SixSixProxyPool.API, params=params, timeout=6, headers=headers)
+                    response = requests.get(ProxyPool.SixSixProxyPool.API, params=params, timeout=6, headers=headers)
                     if response.ok:
                         for item in response.json().get('data', []):
                             proxy = f"{proto}://{item.get('ip')}:{item.get('port')}"
@@ -467,7 +467,7 @@ class ProxyPoolV2:
         def fetch(region=None, protocols=None):
             proxies = []
             try:
-                indexCode = requests.get(ProxyPoolV2.YunProxyPool.INDEXURL, timeout=6).content
+                indexCode = requests.get(ProxyPool.YunProxyPool.INDEXURL, timeout=6).content
                 indexSoup = BeautifulSoup(indexCode, 'html.parser')
                 lastPage = int(indexSoup.select_one('#listnav a:nth-last-of-type(3)').get_text())
             except Exception as e:
@@ -480,7 +480,7 @@ class ProxyPoolV2:
                         soup = indexSoup
                     else:
                         code = requests.get(
-                            f'{ProxyPoolV2.YunProxyPool.INDEXURL}?stype=1&page={page}', timeout=6
+                            f'{ProxyPool.YunProxyPool.INDEXURL}?stype=1&page={page}', timeout=6
                         ).content
                         soup = BeautifulSoup(code, 'html.parser')
 
@@ -502,24 +502,24 @@ class ProxyPoolV2:
 
 
 # 注册内置代理源
-ProxyPoolV2.register_source(ProxyPoolV2.ZdyProxyPool)
-ProxyPoolV2.register_source(ProxyPoolV2.SixSixProxyPool)
-ProxyPoolV2.register_source(ProxyPoolV2.YunProxyPool)
+ProxyPool.register_source(ProxyPool.ZdyProxyPool)
+ProxyPool.register_source(ProxyPool.SixSixProxyPool)
+ProxyPool.register_source(ProxyPool.YunProxyPool)
 
 
 if __name__ == '__main__':
     # 示例1：获取10条国内http代理
-    proxies = ProxyPoolV2.main(total=10, filter=('china', 'http'))
-    ProxyPoolV2.export(fmt='json')
+    proxies = ProxyPool.main(total=10, filter=('china', 'http'))
+    ProxyPool.export(fmt='json')
 
     # 示例2：获取5条海外https代理
-    # proxies = ProxyPoolV2.main(total=5, filter=('abroad', 'https'))
+    # proxies = ProxyPool.main(total=5, filter=('abroad', 'https'))
 
     # 示例3：获取20条国内http+https代理
-    # proxies = ProxyPoolV2.main(total=20, filter=('china', ('http', 'https')))
+    # proxies = ProxyPool.main(total=20, filter=('china', ('http', 'https')))
 
     # 示例4：不限地区，只要http代理
-    # proxies = ProxyPoolV2.main(total=10, filter=(None, 'http'))
+    # proxies = ProxyPool.main(total=10, filter=(None, 'http'))
 
     # 示例5：全量检测，不限地区不限协议
-    # proxies = ProxyPoolV2.main()
+    # proxies = ProxyPool.main()
