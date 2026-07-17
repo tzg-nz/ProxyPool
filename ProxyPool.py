@@ -370,6 +370,26 @@ class ProxyPool:
         print(f'✅已导出 {len(seen)} 条不重复代理到 {filepath}')
         return content
 
+    # ==================== 获取代理 ====================
+
+    @classmethod
+    def get_proxy(cls):
+        """
+        获取延迟最低的可用代理，返回可直接传给 requests 的 proxies 参数
+
+        :return: {'http': 'http://ip:port', 'https': 'http://ip:port'} 或 None（无可用代理时）
+
+        使用示例：
+            proxy = ProxyPool.get_proxy()
+            resp = requests.get('https://example.com', proxies=proxy, timeout=10)
+        """
+        if not cls.availableProxy:
+            print('⚠️ 没有可用代理，请先调用 main() 获取')
+            return None
+        proxy = cls.availableProxy[0]
+        ip_port = proxy[proxy.find('://') + 3:]
+        return {'http': f'http://{ip_port}', 'https': f'http://{ip_port}'}
+
     # ==================== 代理源实现 ====================
 
     class ZdyProxyPool:
@@ -509,8 +529,8 @@ ProxyPool.register_source(ProxyPool.YunProxyPool)
 
 if __name__ == '__main__':
     # 示例1：获取10条国内http代理
-    proxies = ProxyPool.main(total=10, filter=('china', 'http'))
-    ProxyPool.export(fmt='json')
+    proxies = ProxyPool.main(total=5, filter=('china', 'http'))
+    ProxyPool.export(fmt='jsonl')
 
     # 示例2：获取5条海外https代理
     # proxies = ProxyPool.main(total=5, filter=('abroad', 'https'))
