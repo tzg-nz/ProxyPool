@@ -1,0 +1,6 @@
+# Python
+__pycache__/
+*.pyc
+
+# 代理导出文件
+proxies.*
