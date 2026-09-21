@@ -610,18 +610,5 @@ ProxyPool.register_source(ProxyPool.ZdyProxyPool)
 ProxyPool.register_source(ProxyPool.ProxyFreeOnlyProxyPool)
 
 if __name__ == '__main__':
-    # 示例1：获取10条国内http代理
     proxies = ProxyPool.main(total=5, filter=('china', None), retest=False)
     ProxyPool.export(fmt='jsonl')
-
-    # 示例2：获取5条海外https代理
-    # proxies = ProxyPool.main(total=5, filter=('abroad', 'https'))
-
-    # 示例3：获取20条国内http+https代理
-    # proxies = ProxyPool.main(total=20, filter=('china', ('http', 'https')))
-
-    # 示例4：不限地区，只要http代理
-    # proxies = ProxyPool.main(total=10, filter=(None, 'http'))
-
-    # 示例5：全量检测，不限地区不限协议
-    # proxies = ProxyPool.main()
