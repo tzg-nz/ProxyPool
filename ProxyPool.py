@@ -4,7 +4,6 @@ import time
 import json
 import os
 import threading
-from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -96,6 +95,7 @@ class ProxyPool:
     allProxy = []
     availableProxy = []
     _proxyLatency = {}  # proxy -> latency_ms
+    _proxySource = {}  # proxy -> 来源代理源名称
     _lock = threading.Lock()
 
     _TEST_URLS = ['https://icanhazip.com/', 'https://myip.ipip.net/', 'https://api.ip.sb/ip']
@@ -110,7 +110,7 @@ class ProxyPool:
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
     ]
 
-    def __init__(self, total=None, filter=None, sources=None, useWeight=True, shuffle=False):
+    def __init__(self, total=None, filter=None, sources=None):
         """
         :param total: 需要的可用代理总数，达到即停
         :param filter: 过滤条件元组 (region, protocol)
@@ -118,13 +118,9 @@ class ProxyPool:
             protocol: 'http'/'https'/('http','https')/None(全部)
             示例：('china', 'http')  ('abroad', ('http', 'https'))  (None, 'https')
         :param sources: 代理源名称列表，None=使用全部
-        :param useWeight: 是否按权重优先爬取，True=高权重源优先
-        :param shuffle: 是否打乱代理顺序再检测，True=随机顺序检测
         """
         self.total = total
         self.sources = sources
-        self.useWeight = useWeight
-        self.shuffle = shuffle
         # 解析filter元组
         if filter is None:
             self.region = None
@@ -177,7 +173,7 @@ class ProxyPool:
             return []
 
     def _fetchAllProxies(self):
-        """获取代理，按权重模式决定并发或串行"""
+        """按权重降序串行获取，返回有序的 {源名: [代理,...]}（跨源去重）"""
         sourceNames = self.sources or list(self._SOURCES.keys())
         # 单选地区时，跳过该地区权重为None的源（该源没有此地区代理，爬了也是浪费请求）
         if self.region is not None:
@@ -187,43 +183,33 @@ class ProxyPool:
             sourceNames = [n for n in sourceNames if n not in skipped]
             if not sourceNames:
                 print(f'⚠️ 指定的代理源均无{"国外" if self.region == "abroad" else "国内"}代理，无法获取')
-                return []
-        allProxies = []
+                return {}
+
+        # 按权重降序排列，高权重优先爬取（单选地区用对应地区权重，全选用综合权重）
+        sortedSources = sorted(
+            sourceNames,
+            key=lambda name: ProxyPool._getWeight(name, self.region),
+            reverse=True
+        )
+        weightDesc = '综合' if self.region is None else ('国内' if self.region == 'china' else '国外')
+        weightStr = ' > '.join(f'{s}({ProxyPool._getWeight(s, self.region):g})' for s in sortedSources)
+        print(f'权重模式({weightDesc}权重优先)：{weightStr}')
+
+        sourceProxyMap = {}
         seen = set()
+        for name in sortedSources:
+            proxies = self._fetchFromSource(name)
+            dedup = []
+            for p in proxies:
+                if p not in seen:
+                    seen.add(p)
+                    dedup.append(p)
+                    ProxyPool._proxySource[p] = name
+            sourceProxyMap[name] = dedup
 
-        if self.useWeight:
-            # 按权重降序排列，高权重优先爬取（单选地区用对应地区权重，全选用综合权重）
-            sortedSources = sorted(
-                sourceNames,
-                key=lambda name: ProxyPool._getWeight(name, self.region),
-                reverse=True
-            )
-            weightDesc = '综合' if self.region is None else ('国内' if self.region == 'china' else '国外')
-            weightStr = ' > '.join(f'{s}({ProxyPool._getWeight(s, self.region):g})' for s in sortedSources)
-            print(f'权重模式({weightDesc}权重优先)：{weightStr}')
-            for name in sortedSources:
-                proxies = self._fetchFromSource(name)
-                for p in proxies:
-                    if p not in seen:
-                        seen.add(p)
-                        allProxies.append(p)
-        else:
-            # 并发获取所有代理源
-            with ThreadPoolExecutor(max_workers=len(sourceNames)) as executor:
-                futures = {executor.submit(self._fetchFromSource, name): name for name in sourceNames}
-                for future in as_completed(futures):
-                    try:
-                        proxies = future.result()
-                        for p in proxies:
-                            if p not in seen:
-                                seen.add(p)
-                                allProxies.append(p)
-                    except Exception:
-                        continue
-
-        print(f'\n共获取 {len(allProxies)} 条不重复代理')
-        ProxyPool.allProxy = allProxies
-        return allProxies
+        print(f'\n共获取 {len(seen)} 条不重复代理')
+        ProxyPool.allProxy = [p for lst in sourceProxyMap.values() for p in lst]
+        return sourceProxyMap
 
     # ==================== 代理检测 ====================
 
@@ -244,83 +230,94 @@ class ProxyPool:
                 return (None, 0)
         return (None, 0)
 
-    def _checkProxies(self, proxyList, maxWorks=8):
-        """并发检测代理，达到total即停"""
-        if not proxyList:
+    def _checkProxies(self, sourceProxyMap, maxWorks=8):
+        """按权重顺序逐源并发检测，累计达到total即停
+        :param sourceProxyMap: 有序的 {源名: [代理,...]}，源名只在该批开始打印一次
+        """
+        total_count = sum(len(v) for v in sourceProxyMap.values())
+        if total_count == 0:
             print('⚠️没有代理需要检测')
             return
 
-        target = self.total or len(proxyList)
-        total_count = len(proxyList)
+        target = self.total or total_count
         checked = [0]
         available = ProxyPool.availableProxy
-        proxyIter = iter(proxyList)
 
         print(f'开始检测 {total_count} 条代理，目标 {target} 条，并发 {maxWorks} 线程')
         print('-' * 80)
 
-        with ThreadPoolExecutor(max_workers=maxWorks) as executor:
-            futures = []
-            while True:
-                # 提交任务
-                while len(futures) < maxWorks:
-                    try:
-                        proxy = next(proxyIter)
-                        futures.append(executor.submit(self._testProxy, proxy, target))
-                    except StopIteration:
+        for srcName, proxyList in sourceProxyMap.items():
+            if len(available) >= target:
+                break
+            if not proxyList:
+                continue
+            # 按权重逐源检测，故只在每源开始处标明网站，后续每行不再重复来源
+            print(f'\n🌐 {srcName}（{len(proxyList)} 条）')
+            proxyIter = iter(proxyList)
+            with ThreadPoolExecutor(max_workers=maxWorks) as executor:
+                futures = []
+                while True:
+                    # 提交任务
+                    while len(futures) < maxWorks:
+                        try:
+                            proxy = next(proxyIter)
+                            futures.append(executor.submit(self._testProxy, proxy, target))
+                        except StopIteration:
+                            break
+
+                    if not futures:
                         break
 
-                if not futures:
-                    break
-
-                # 处理结果
-                for future in as_completed(futures):
-                    futures.remove(future)
-                    try:
-                        res, elapsed = future.result()
-                        with ProxyPool._lock:
-                            checked[0] += 1
-                            if res is not None:
-                                if len(available) >= target:
-                                    return
-                                if res not in available:
-                                    available.append(res)
-                                    ProxyPool._proxyLatency[res] = elapsed
-                                    print(f'✅ {res} ({elapsed:.0f}ms) | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
+                    # 处理结果
+                    for future in as_completed(futures):
+                        futures.remove(future)
+                        try:
+                            res, elapsed = future.result()
+                            with ProxyPool._lock:
+                                checked[0] += 1
+                                if res is not None:
                                     if len(available) >= target:
-                                        print(f'\n✅已达目标数量 {target}')
                                         return
+                                    if res not in available:
+                                        available.append(res)
+                                        ProxyPool._proxyLatency[res] = elapsed
+                                        print(
+                                            f'✅ {res} ({elapsed:.0f}ms) | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
+                                        if len(available) >= target:
+                                            print(f'\n✅已达目标数量 {target}')
+                                            return
+                                    else:
+                                        print(
+                                            f'⚠️ {res} 重复 | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
                                 else:
-                                    print(f'⚠️ {res} 重复 | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
-                            else:
-                                print(f'❌ 无效 | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
-                    except Exception:
-                        continue
+                                    print(f'❌ 无效 | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
+                        except Exception:
+                            continue
 
     # ==================== 主入口 ====================
 
     @classmethod
-    def main(cls, total=None, filter=None, sources=None, useWeight=True, shuffle=False, maxWorks=8):
+    def main(cls, total=None, filter=None, sources=None, maxWorks=8, retest=True):
         """
-        获取并验证代理
+        获取并验证代理（始终按权重优先：高权重源先爬先检测）
 
         :param total: 需要的可用代理总数，达到即停（None=全量检测）
         :param filter: 过滤条件元组 (region, protocol)
             region: 'china'/'abroad'/None(全部)
             protocol: 'http'/'https'/('http','https')/None(全部)
             示例：('china', 'http')  ('abroad', ('http', 'https'))  (None, 'https')
-        :param sources: 代理源名称列表，如 ['站大爷代理', '云代理']，None=使用全部
-        :param useWeight: 是否按权重优先爬取，True=高权重源先爬先检测
-        :param shuffle: 是否打乱代理顺序再检测，True=随机顺序检测，避免同一网站代理集中检测
+        :param sources: 代理源名称列表，如 ['站大爷代理']，None=使用全部
         :param maxWorks: 并发检测线程数
+        :param retest: 是否二次筛选，True=对第一次存活的代理再复测一遍，只保留两次都通过的（更稳，输出分"第一次筛选/第二次筛选"）；False=单次检测
         :return: 可用代理列表
         """
         # 重置
         cls.allProxy = []
         cls.availableProxy = []
         cls._proxyLatency = {}
+        cls._proxySource = {}
 
-        instance = cls(total, filter, sources, useWeight, shuffle)
+        instance = cls(total, filter, sources)
 
         # 0. 验证测速网站
         print('=' * 80)
@@ -328,32 +325,41 @@ class ProxyPool:
         print('=' * 80)
         cls._checkTestUrls()
 
-        # shuffle与useWeight互斥：shuffle会打乱权重排好的顺序
-        if instance.shuffle and instance.useWeight:
-            print('⚠️ shuffle=True 时 useWeight 无意义，已自动关闭权重模式')
-            instance.useWeight = False
-
-        # 1. 从所有代理源获取代理
+        # 1. 从所有代理源按权重串行获取代理
         region_str = instance.region or '全部'
         proto_str = ','.join(instance.protocols) if instance.protocols else '全部'
         print('=' * 80)
-        print(f'地区：{region_str} | 协议：{proto_str} | 代理源：{sources or "全部"} | 目标数量：{total or "不限"} | 权重模式：{"开启" if instance.useWeight else "关闭"} | 随机检测：{"开启" if instance.shuffle else "关闭"}')
+        print(
+            f'地区：{region_str} | 协议：{proto_str} | 代理源：{sources or "全部"} | 目标数量：{total or "不限"} | 二次筛选：{"开启" if retest else "关闭"}')
         print('=' * 80)
-        allProxies = instance._fetchAllProxies()
+        sourceProxyMap = instance._fetchAllProxies()
 
-        # 2. 打乱代理顺序
-        if instance.shuffle:
-            random.shuffle(allProxies)
-            print('🔀 已打乱代理检测顺序')
-        elif instance.useWeight:
-            print('📌 按权重顺序检测（高权重源在前）')
+        # 2. 第一次检测：按权重顺序逐源并发检测
+        if retest:
+            print('\n' + '=' * 80)
+            print('第一次筛选'.center(80))
+            print('=' * 80)
         else:
-            print('📌 按获取顺序检测')
+            print('\n开始检测代理可用性...')
+            print('=' * 80)
+        instance._checkProxies(sourceProxyMap, maxWorks)
 
-        # 3. 并发检测代理
-        print('\n开始检测代理可用性...')
-        print('=' * 80)
-        instance._checkProxies(allProxies, maxWorks)
+        # 3. 二次筛选：对第一次存活的代理复测，只保留两次都通过的（剔除抖动/偶发可用）
+        if retest and cls.availableProxy:
+            survivors = list(cls.availableProxy)
+            reMap = {}
+            for p in survivors:
+                reMap.setdefault(cls._proxySource.get(p, '?'), []).append(p)
+            print('\n' + '=' * 80)
+            print(f'第二次筛选（对第一次存活的 {len(survivors)} 条复测）'.center(80))
+            print('=' * 80)
+            # 重置可用与延迟，复测结果覆盖；不设 target 上限，把存活项全部复测完
+            cls.availableProxy = []
+            cls._proxyLatency = {}
+            savedTotal = instance.total
+            instance.total = None
+            instance._checkProxies(reMap, maxWorks)
+            instance.total = savedTotal
 
         # 4. 按延迟排序，最快的在前
         cls.availableProxy.sort(key=lambda p: cls._proxyLatency.get(p, float('inf')))
@@ -362,7 +368,8 @@ class ProxyPool:
         print(f'检测完成，共 {len(cls.availableProxy)} 条可用代理（按延迟排序）')
         for i, p in enumerate(cls.availableProxy, 1):
             latency = cls._proxyLatency.get(p, 0)
-            print(f'  {i}. {p} ({latency:.0f}ms)')
+            src = cls._proxySource.get(p, '?')
+            print(f'  {i}. [{src}] {p} ({latency:.0f}ms)')
         print('=' * 80)
         return cls.availableProxy
 
@@ -383,13 +390,14 @@ class ProxyPool:
             lines = [p for p in proxies if not (p in seen or seen.add(p))]
             content = '\n'.join(lines)
         elif fmt == 'json':
-            # 按协议分组，包含延迟
+            # 按协议分组，包含来源与延迟
             grouped = {'http': [], 'https': []}
             for p in proxies:
                 proto = 'https' if p.startswith('https://') else 'http'
                 if p not in seen:
                     seen.add(p)
                     grouped[proto].append({
+                        'source': cls._proxySource.get(p, ''),
                         'proxy': p,
                         'latency_ms': round(cls._proxyLatency.get(p, 0))
                     })
@@ -401,6 +409,7 @@ class ProxyPool:
                     seen.add(p)
                     proto = 'https' if p.startswith('https://') else 'http'
                     lines.append(json.dumps({
+                        'source': cls._proxySource.get(p, ''),
                         'protocol': proto,
                         'proxy': p,
                         'latency_ms': round(cls._proxyLatency.get(p, 0))
@@ -419,9 +428,10 @@ class ProxyPool:
     # ==================== 获取代理 ====================
 
     @classmethod
-    def get_proxy(cls, getNum=1, testNum=5, filter=None, sources=None, useWeight=True, shuffle=False, maxWorks=8):
+    def get_proxy(cls, getNum=1, testNum=5, filter=None, sources=None, maxWorks=8):
         """
         快捷获取代理：相当于调用 main() 检测出 testNum 条可用代理，再取延迟最低（最优）的 getNum 条
+        （get_proxy 面向快速取用，固定不做二次筛选）
 
         :param getNum: 最终获取的代理数量，默认1
         :param testNum: 检测的可用代理数量，默认5（先检测出5条，再从中取最优的）
@@ -429,8 +439,6 @@ class ProxyPool:
             region: 'china'/'abroad'/None(全部)
             protocol: 'http'/'https'/('http','https')/None(全部)
         :param sources: 代理源名称列表，None=使用全部，同 main()
-        :param useWeight: 是否按权重优先爬取，同 main()
-        :param shuffle: 是否打乱代理顺序检测，同 main()
         :param maxWorks: 并发检测线程数，同 main()
         :return: getNum=1 时返回 {'http': 'http://ip:port', 'https': 'http://ip:port'}；
                  getNum>1 时返回字典列表；无可用代理时 getNum=1 返回 None、getNum>1 返回 []
@@ -443,8 +451,7 @@ class ProxyPool:
             # 只要国内http代理，检测出5条后取最优3条
             proxies = ProxyPool.get_proxy(getNum=3, testNum=5, filter=('china', 'http'))
         """
-        available = cls.main(total=testNum, filter=filter, sources=sources,
-                             useWeight=useWeight, shuffle=shuffle, maxWorks=maxWorks)
+        available = cls.main(total=testNum, filter=filter, sources=sources, maxWorks=maxWorks, retest=False)
         if not available:
             print('⚠️ 没有可用代理')
             return None if getNum == 1 else []
@@ -457,15 +464,24 @@ class ProxyPool:
     # ==================== 代理源实现 ====================
 
     class ZdyProxyPool:
-        """站大爷代理 - protocol_type: 1=http, 2=socks4, 3=socks5, 4=https; dalu: 1=国内, 0=海外"""
+        """站大爷免费代理API - http://www.zdopen.com/FreeProxy/Get/
+        参数：count 最大100(超出仍按100返回)、dalu(必选) 1=大陆/0=海外、
+        protocol_type 1=http/2=socks4/3=socks5/4=https、level_type 1高匿/2普匿/3匿名/4透明/5未知、return_type 3=JSON；
+        文档要求调用间隔≥1秒(否则 code=12002)。
+        重要坑：① 免费池 protocol_type 不可靠——传 4(https) 返回条目的 protocol 字段仍是 http，故协议一律以每条
+        item 的 protocol 字段为准，绝不按请求参数硬贴标签，socks 及非本次请求协议本地剔除；
+        ② 单查固定只回 100 条且重复调用不轮换(第2次起全旧数据)，要提量只能按 level_type 分桶并集：
+        各匿名等级是独立的 ≤100 桶，LEVELS 全并集实测国内 http 约 200+ 条(单查仅 100)。"""
         NAME = '站大爷代理'
         # (国内权重, 国外权重)，API支持dalu参数筛选国内/国外，质量对等
         WEIGHT = (3, 3)
         API = "http://www.zdopen.com/FreeProxy/Get/"
-
-        def __init__(self):
-            self.app_id = '202606120521419669'
-            self.akey = 'bf0c7ca08a8f2fd9'
+        APP_ID = '202606120521419669'
+        AKEY = 'bf0c7ca08a8f2fd9'
+        COUNT = 100  # 接口单次上限
+        INTERVAL = 1.1  # 文档要求 ≥1 秒调一次
+        # 匿名等级分桶(1高匿/2普匿/3匿名/4透明/5未知)并集提量；设为 (None,) 则关闭分桶仅单查100
+        LEVELS = (1, 2, 3, 4, 5)
 
         @staticmethod
         def fetch(region=None, protocols=None):
@@ -473,198 +489,129 @@ class ProxyPool:
             :param region: 'china'/'abroad'/None
             :param protocols: ['http']/['https']/['http','https']/None
             """
-            self = ProxyPool.ZdyProxyPool()
-            proxies = []
-            # 协议映射
-            proto_map = {'http': 1, 'https': 4}
-            if protocols:
-                type_list = [(proto_map[p], p) for p in protocols if p in proto_map]
-            else:
-                type_list = [(1, 'http'), (4, 'https')]
-
-            # 地区映射：dalu 1=国内, 0=海外
-            if region == 'china':
-                dalu_list = [1]
-            elif region == 'abroad':
-                dalu_list = [0]
-            else:
-                dalu_list = [1, 0]
-
-            for protocol_type, proto_prefix in type_list:
-                for dalu in dalu_list:
-                    params = {
-                        "app_id": self.app_id,
-                        "akey": self.akey,
-                        "count": 100,
-                        "dalu": dalu,
-                        "protocol_type": protocol_type,
-                        "return_type": 3
-                    }
-                    headers = {'User-Agent': random.choice(ProxyPool._UALIST)}
-                    try:
-                        response = requests.get(self.API, params=params, timeout=6, headers=headers)
-                        if response.ok:
-                            for item in response.json().get('data', {}).get('proxy_list', []):
-                                proxy = f"{proto_prefix}://{item.get('ip')}:{item.get('port')}"
-                                proxies.append(proxy)
-                    except Exception as e:
-                        print(f'[站大爷代理] 请求失败：{e}')
-                    time.sleep(1)
-            return proxies
-
-    class SixSixProxyPool:
-        """六六代理 - 仅国内代理（官网地区分类只有中国省份），API不分地区"""
-        NAME = '六六代理'
-        # (国内权重, 国外权重)，国外为None表示该源没有国外代理，region='abroad'时跳过此源
-        WEIGHT = (2, None)
-        API = 'http://api.66daili.com/'
-
-        @staticmethod
-        def fetch(region=None, protocols=None):
-            proxies = []
-            if protocols:
-                proto_list = protocols
-            else:
-                proto_list = ['http', 'https']
-
-            for proto in proto_list:
-                params = {'num': '60', 'protocol': proto, 'format': 'json'}
-                headers = {'User-Agent': random.choice(ProxyPool._UALIST)}
-                try:
-                    response = requests.get(ProxyPool.SixSixProxyPool.API, params=params, timeout=6, headers=headers)
-                    if response.ok:
-                        for item in response.json().get('data', []):
-                            proxy = f"{proto}://{item.get('ip')}:{item.get('port')}"
-                            proxies.append(proxy)
-                    elif response.status_code == 429:
-                        print('[六六代理] 请求次数过多，稍后重试')
-                except Exception as e:
-                    print(f'[六六代理] 请求失败：{e}')
-                time.sleep(1)
-            return proxies
-
-    class YunProxyPool:
-        """云代理 - 仅国内代理，爬取ip3366国内高匿页(stype=1)，无国外数据"""
-        NAME = '云代理'
-        # (国内权重, 国外权重)，国外为None表示该源没有国外代理，region='abroad'时跳过此源
-        WEIGHT = (2, None)
-        INDEXURL = 'http://www.ip3366.net/free/'
-
-        @staticmethod
-        def fetch(region=None, protocols=None):
-            proxies = []
-            try:
-                indexCode = requests.get(ProxyPool.YunProxyPool.INDEXURL, timeout=6).content
-                indexSoup = BeautifulSoup(indexCode, 'html.parser')
-                lastPage = int(indexSoup.select_one('#listnav a:nth-last-of-type(3)').get_text())
-            except Exception as e:
-                print(f'[云代理] 获取页数失败：{e}')
+            # 期望协议（小写），None=都要 http/https；框架仅支持 http/https，socks 忽略
+            want = {p.lower() for p in protocols} if protocols else {'http', 'https'}
+            want &= {'http', 'https'}
+            if not want:
                 return []
+            # 地区：dalu 1=大陆, 0=海外
+            if region == 'china':
+                daluList = [1]
+            elif region == 'abroad':
+                daluList = [0]
+            else:
+                daluList = [1, 0]
+            # protocol_type 仅用于提高命中密度；最终以返回体 protocol 字段过滤，避免协议错标
+            typeMap = {'http': 1, 'https': 4}
+            # level_type 各匿名等级为独立 ≤100 桶，逐桶并集以提量；LEVELS=(None,) 时不分桶
+            levels = ProxyPool.ZdyProxyPool.LEVELS or (None,)
 
-            for page in range(1, lastPage + 1):
-                try:
-                    if page == 1:
-                        soup = indexSoup
-                    else:
-                        code = requests.get(
-                            f'{ProxyPool.YunProxyPool.INDEXURL}?stype=1&page={page}', timeout=6
-                        ).content
-                        soup = BeautifulSoup(code, 'html.parser')
-
-                    for tr in soup.select('table tbody tr'):
-                        tds = tr.find_all('td')
-                        if len(tds) < 5:
+            seen = set()
+            proxies = []
+            for dalu in daluList:
+                for proto in sorted(want):
+                    for level in levels:
+                        params = {
+                            'app_id': ProxyPool.ZdyProxyPool.APP_ID,
+                            'akey': ProxyPool.ZdyProxyPool.AKEY,
+                            'count': ProxyPool.ZdyProxyPool.COUNT,
+                            'dalu': dalu,
+                            'protocol_type': typeMap[proto],
+                            'return_type': 3,
+                        }
+                        if level is not None:
+                            params['level_type'] = level
+                        headers = {'User-Agent': random.choice(ProxyPool._UALIST)}
+                        try:
+                            response = requests.get(ProxyPool.ZdyProxyPool.API, params=params, timeout=10,
+                                                    headers=headers)
+                            result = response.json()
+                        except Exception as e:
+                            print(f'[站大爷代理] 请求失败：{e}')
+                            time.sleep(ProxyPool.ZdyProxyPool.INTERVAL)
                             continue
-                        ip = tds[0].get_text().strip()
-                        port = tds[1].get_text().strip()
-                        proto = tds[3].get_text().strip().lower()
-                        # 根据protocols参数过滤
-                        if protocols and proto not in protocols:
-                            continue
-                        proxy = f"{proto}://{ip}:{port}"
-                        proxies.append(proxy)
-                except Exception as e:
-                    print(f'[云代理] 第{page}页获取失败：{e}')
+                        code = str(result.get('code'))
+                        # 10001 成功；12009 该条件无代理(免费池https常空) 静默跳过；其余异常提示
+                        if code not in ('10001', '12009'):
+                            print(f'[站大爷代理] dalu={dalu} {proto} level={level} 返回 code={code}')
+                        for item in (result.get('data') or {}).get('proxy_list', []):
+                            real = (item.get('protocol') or '').lower()
+                            if real != proto:  # 以实际协议为准，过滤错标与 socks
+                                continue
+                            proxy = f"{proto}://{item.get('ip')}:{item.get('port')}"
+                            if proxy not in seen:  # 跨桶去重
+                                seen.add(proxy)
+                                proxies.append(proxy)
+                        time.sleep(ProxyPool.ZdyProxyPool.INTERVAL)
             return proxies
 
-    class FreeVpnNodeProxyPool:
-        """FreeVPNNode代理 - https://cn.freevpnnode.com/free-proxy/
-        综合页含国内外代理（国家代码CN=国内），每页30条，支持http/https/socks4/socks5。
-        region='china'时直接爬中国专属页/free-proxy-for-china/效率更高。
-        代理池框架仅支持http/https，该站的socks4/socks5代理自动忽略。
-        每页请求间隔1秒防封，默认最多爬MAXPAGES页（列表按更新时间排序，越靠前越新鲜）。
-        质量：数据量大（约2.4万条）且每3分钟更新，但国内外实测存活率均极低——前几页80端口
-        条目多为Cloudflare CDN伪代理（仅回HTTP页面不支持CONNECT），真代理又常被墙，
-        (1, 1)仅作补充源"""
-        NAME = 'FreeVPNNode代理'
-        # (国内权重, 国外权重)，国内外实测均极差
-        WEIGHT = (1, 1)
-        INDEXURL = 'https://cn.freevpnnode.com/free-proxy/'
-        CHINAURL = 'https://cn.freevpnnode.com/free-proxy-for-china/'
-        MAXPAGES = 3
+    class ProxyFreeOnlyProxyPool:
+        """proxyfreeonly代理 - https://proxyfreeonly.com/
+        前端数据接口：GET https://proxyfreeonly.com/api/data/proxy-list
+          ?page=1&limit=200&locale=en&where={"country":"china","protocols":"http"}
+        返回 {"items":[{ip,port,protocols[],country:{countryCode,...},upTime,...}],"totalItems":N}。
+        裸请求即可(无需 cookie/CF盾)，且 where.country(用 slug 如 china/united-states)、where.protocols
+        与 limit/page 均在服务端生效，可分页取小量，远优于全量接口 /api/free-proxy-list。
+        本框架：region='china' 传 where.country='china' 并按协议分别请求(数据量小一次拉完)；
+        abroad/None 只按协议请求全国家再本地排除 CN 与噪声国家 NOISE(默认LU机房刷量)；只留 http/https，socks 忽略。
+        质量：CN http/https 本机实测 https 隧道存活约17%、明文约24%，延迟亚秒，是国内免费源较好档；
+        全球池被海量 LU 机房代理稀释、跨境延迟5~10s 且存活极低，故国外权重下调"""
+        NAME = 'proxyfreeonly代理'
+        # (国内权重, 国外权重)，CN 为强项，国外因噪声国家多而下调
+        WEIGHT = (2, 1)
+        API = 'https://proxyfreeonly.com/api/data/proxy-list'
+        NOISE = ('LU',)  # abroad 时本地剔除的数据中心刷量国家(countryCode)
+        PAGE_LIMIT = 200  # 单次服务端返回条数(实测 limit 生效)
+        MAX_PAGES = 5  # 每个协议最多翻页数，防止 abroad 拉太多
+        TIMEOUT = 25
 
         @staticmethod
         def fetch(region=None, protocols=None):
+            proto_list = [p for p in (protocols or ['http', 'https']) if p in ('http', 'https')]
+            noise = ProxyPool.ProxyFreeOnlyProxyPool.NOISE
             proxies = []
-            proto_list = ['http', 'https']
-            if protocols:
-                proto_list = [p for p in proto_list if p in protocols]
-                if not proto_list:
-                    return proxies
-
-            # 地区过滤：None=全部(综合页)，china=只要CN(中国页)，abroad=排除CN(综合页)
-            if region == 'china':
-                baseurls = [ProxyPool.FreeVpnNodeProxyPool.CHINAURL]
-            else:
-                baseurls = [ProxyPool.FreeVpnNodeProxyPool.INDEXURL]
-
-            for baseurl in baseurls:
-                for page in range(1, ProxyPool.FreeVpnNodeProxyPool.MAXPAGES + 1):
+            for proto in proto_list:
+                where = {'protocols': proto}
+                if region == 'china':
+                    where['country'] = 'china'  # 接口用 slug 而非 ISO-2 码
+                whereStr = json.dumps(where, separators=(',', ':'))
+                for page in range(1, ProxyPool.ProxyFreeOnlyProxyPool.MAX_PAGES + 1):
+                    params = {'page': page, 'limit': ProxyPool.ProxyFreeOnlyProxyPool.PAGE_LIMIT,
+                              'locale': 'en', 'where': whereStr}
                     try:
-                        url = baseurl if page == 1 else f'{baseurl}?page={page}'
-                        headers = {'User-Agent': random.choice(ProxyPool._UALIST)}
-                        response = requests.get(url, headers=headers, timeout=6)
-                        if not response.ok:
-                            print(f'[FreeVPNNode代理] 第{page}页状态码异常：{response.status_code}')
-                            break
-                        response.encoding = 'utf-8'
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        trs = soup.select('table.table tbody tr')
-                        if not trs:
-                            break
-                        for tr in trs:
-                            tds = tr.find_all('td')
-                            if len(tds) < 6:
-                                continue
-                            ip = tds[0].get_text(strip=True)
-                            port = tds[1].get_text(strip=True)
-                            proto = tds[5].get_text(strip=True).lower()
-                            if proto not in proto_list:
-                                continue
-                            # 国家代码在第5列（如 CO/US/CN），用于地区过滤
-                            countryA = tds[4].find('a')
-                            country = countryA.get_text(strip=True) if countryA else ''
-                            if region == 'china' and country != 'CN':
-                                continue
-                            if region == 'abroad' and country == 'CN':
-                                continue
-                            proxies.append(f'{proto}://{ip}:{port}')
+                        response = requests.get(
+                            ProxyPool.ProxyFreeOnlyProxyPool.API, params=params,
+                            timeout=ProxyPool.ProxyFreeOnlyProxyPool.TIMEOUT,
+                            headers={'User-Agent': random.choice(ProxyPool._UALIST),
+                                     'Accept': 'application/json, text/plain, */*',
+                                     'Referer': 'https://proxyfreeonly.com/zh/free-proxy-list'}
+                        )
+                        j = response.json()
                     except Exception as e:
-                        print(f'[FreeVPNNode代理] 第{page}页获取失败：{e}')
-                    time.sleep(1)
+                        print(f'[proxyfreeonly代理] 第{page}页获取失败：{e}')
+                        break
+                    items = j.get('items', [])
+                    if not items:
+                        break
+                    for it in items:
+                        # china 已由服务端过滤；仅 abroad 本地排除 CN 与噪声国家
+                        if region == 'abroad':
+                            code = (it.get('country') or {}).get('countryCode')
+                            if code == 'CN' or code in noise:
+                                continue
+                        proxies.append(f"{proto}://{it.get('ip')}:{it.get('port')}")
+                    if page * ProxyPool.ProxyFreeOnlyProxyPool.PAGE_LIMIT >= j.get('totalItems', 0):
+                        break
             return proxies
 
 
 # 注册内置代理源
 ProxyPool.register_source(ProxyPool.ZdyProxyPool)
-ProxyPool.register_source(ProxyPool.SixSixProxyPool)
-ProxyPool.register_source(ProxyPool.YunProxyPool)
-ProxyPool.register_source(ProxyPool.FreeVpnNodeProxyPool)
-
+ProxyPool.register_source(ProxyPool.ProxyFreeOnlyProxyPool)
 
 if __name__ == '__main__':
     # 示例1：获取10条国内http代理
-    proxies = ProxyPool.main(total=5, filter=('china', 'http'))
+    proxies = ProxyPool.main(total=5, filter=('china', None), retest=False)
     ProxyPool.export(fmt='jsonl')
 
     # 示例2：获取5条海外https代理

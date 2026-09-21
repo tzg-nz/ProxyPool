@@ -2,7 +2,7 @@
 
 ## 概述
 
-`ProxyPool` 是一个多源代理获取与验证模块，支持从多个代理网站获取代理并自动验证可用性。支持按地区（国内/海外）和协议（http/https）过滤，按权重优先爬取或随机顺序检测。
+`ProxyPool` 是一个多源代理获取与验证模块，支持从多个代理网站获取代理并自动验证可用性。支持按地区（国内/海外）和协议（http/https）过滤，始终按权重优先爬取（高权重源先爬先检测），并可对首轮存活的代理做二次筛选以提升稳定性。
 
 ---
 
@@ -15,7 +15,7 @@
 **签名：**
 
 ```python
-main(total=None, filter=None, sources=None, useWeight=True, shuffle=False, maxWorks=8)
+main(total=None, filter=None, sources=None, maxWorks=8, retest=True)
 ```
 
 **参数：**
@@ -25,14 +25,14 @@ main(total=None, filter=None, sources=None, useWeight=True, shuffle=False, maxWo
 | `total` | int | None | 需要的可用代理总数，达到即停（None=全量检测） |
 | `filter` | tuple | None | 过滤条件，格式 `(region, protocol)`，详见下方 |
 | `sources` | list | None | 代理源名称列表，None=使用全部注册源 |
-| `useWeight` | bool | True | 是否按权重优先爬取，高权重源先爬先检测 |
-| `shuffle` | bool | False | 是否打乱代理检测顺序（与 useWeight 互斥，True 时自动关闭权重模式） |
 | `maxWorks` | int | 8 | 并发检测线程数 |
+| `retest` | bool | True | 是否二次筛选：True=对第一次存活的代理再复测一遍，只保留两次都通过的（更稳定，输出分「第一次筛选 / 第二次筛选」两段）；False=单次检测 |
 
 **filter 参数格式：**
 - `region`: `'china'` / `'abroad'` / `None`（全部）
 - `protocol`: `'http'` / `'https'` / `('http', 'https')` / `None`（全部）
 - 示例：`('china', 'http')`、`('abroad', 'https')`、`(None, ('http', 'https'))`
+- ⚠️ **必须传元组**，不能传裸字符串：`filter='china'` 会被按字符解析成 `region='c'`、`protocol='h'`，导致匹配不到任何代理
 
 **返回值：** `list` —— 可用代理列表（如 `['http://1.2.3.4:8080', ...]`），已按延迟升序排列（最快的在前）。
 
@@ -43,6 +43,7 @@ main(total=None, filter=None, sources=None, useWeight=True, shuffle=False, maxWo
 | `ProxyPool.availableProxy` | 检测通过的可用代理，按延迟升序 |
 | `ProxyPool.allProxy` | 爬取到的原始代理（未检测），去重后 |
 | `ProxyPool._proxyLatency` | `dict`，代理 → 检测延迟（ms） |
+| `ProxyPool._proxySource` | `dict`，代理 → 来源代理源名称 |
 
 每次调用 `main()` 会重置上述状态。`get_proxy()` / `export()` 读取的就是 `ProxyPool.availableProxy`。
 
@@ -74,12 +75,12 @@ proxies = ProxyPool.main(total=5, sources=['站大爷代理'])
 
 ### `ProxyPool.get_proxy()`
 
-快捷获取代理（类方法）：相当于调用 `main()` 检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条。
+快捷获取代理（类方法）：相当于调用 `main()` 检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条。面向快速取用，内部固定 `retest=False`，不做二次筛选。
 
 **签名：**
 
 ```python
-get_proxy(getNum=1, testNum=5, filter=None, sources=None, useWeight=True, shuffle=False, maxWorks=8)
+get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8)
 ```
 
 **参数：**
@@ -90,8 +91,6 @@ get_proxy(getNum=1, testNum=5, filter=None, sources=None, useWeight=True, shuffl
 | `testNum` | int | 5 | 检测的可用代理数量（先检测出5条，再从中取最优） |
 | `filter` | tuple | None | 过滤条件 `(region, protocol)`，同 `main()` |
 | `sources` | list | None | 代理源名称列表，同 `main()` |
-| `useWeight` | bool | True | 同 `main()` |
-| `shuffle` | bool | False | 同 `main()` |
 | `maxWorks` | int | 8 | 同 `main()` |
 
 **返回值：**
@@ -157,13 +156,13 @@ http://5.6.7.8:3128
 
 ### `json` 格式
 
-按协议分组，包含延迟：
+按协议分组，包含来源与延迟：
 
 ```json
 {
   "http": [
-    {"proxy": "http://1.2.3.4:8080", "latency_ms": 120},
-    {"proxy": "http://5.6.7.8:3128", "latency_ms": 350}
+    {"source": "站大爷代理", "proxy": "http://1.2.3.4:8080", "latency_ms": 120},
+    {"source": "proxyfreeonly代理", "proxy": "http://5.6.7.8:3128", "latency_ms": 350}
   ],
   "https": []
 }
@@ -174,8 +173,8 @@ http://5.6.7.8:3128
 每行一条JSON记录：
 
 ```jsonl
-{"protocol":"http","proxy":"http://1.2.3.4:8080","latency_ms":120}
-{"protocol":"https","proxy":"https://9.10.11.12:443","latency_ms":200}
+{"source":"站大爷代理","protocol":"http","proxy":"http://1.2.3.4:8080","latency_ms":120}
+{"source":"站大爷代理","protocol":"https","proxy":"https://9.10.11.12:443","latency_ms":200}
 ```
 
 ---
@@ -187,9 +186,7 @@ http://5.6.7.8:3128
 | 名称 | 类名 | 国内权重 | 国外权重 | 综合权重 |
 |------|------|----------|----------|----------|
 | 站大爷代理 | `ZdyProxyPool` | 3 | 3 | 3 |
-| 六六代理 | `SixSixProxyPool` | 2 | None（无国外） | 2 |
-| 云代理 | `YunProxyPool` | 2 | None（无国外） | 2 |
-| FreeVPNNode代理 | `FreeVpnNodeProxyPool` | 1 | 1 | 1 |
+| proxyfreeonly代理 | `ProxyFreeOnlyProxyPool` | 2 | 1 | 1.5 |
 
 ### 权重机制（国内/国外双权重）
 
@@ -198,20 +195,19 @@ http://5.6.7.8:3128
 - `filter=('china', ...)`：按**国内权重**降序爬取源
 - `filter=('abroad', ...)`：按**国外权重**降序爬取源
 - 全选（不指定地区）：按**综合权重**（忽略 None 取平均值）降序爬取源
-- 权重项为 `None` 表示该源没有对应地区的代理（如六六/云代理只有国内），单选该地区时**自动跳过不爬取**，全选时综合权重忽略该 None 项
+- 权重项为 `None` 表示该源没有对应地区的代理（如某源只有国内），单选该地区时**自动跳过不爬取**，全选时综合权重忽略该 None 项
 
-**FreeVPNNode代理 说明**（https://cn.freevpnnode.com/free-proxy/）：
-- 综合页含国内外代理（国家代码 CN=国内），`region='abroad'` 时自动剔除中国代理；默认爬取前 3 页（每页 30 条），可通过 `ProxyPool.FreeVpnNodeProxyPool.MAXPAGES` 调整
-- `region='china'` 时自动改爬中国专属页 `/free-proxy-for-china/`
-- 该站还有 socks4/socks5 代理，但代理池框架仅支持 http/https，会自动忽略
-- 质量评估：数据量大（约 2.4 万条）且每 3 分钟更新，但实测存活率极低（80 端口条目多为 CDN 伪代理、真代理常被墙），权重设为 1 仅作补充源
+**站大爷代理 说明**（http://www.zdaye.com/）：
+- **国内外均有**：走免费 API `http://www.zdopen.com/FreeProxy/Get/`，`count` 上限 100（超出仍按 100 返回），`dalu` 1=大陆/0=海外，`return_type=3` 取 JSON；文档要求调用间隔 ≥1 秒（否则 `code=12002`），已内置 1.1s 节流
+- **协议以每条返回的 `protocol` 字段为准**：免费池 `protocol_type` 不可靠（传 4=https 返回的条目 `protocol` 仍是 http），故不按请求参数硬贴标签，`socks` 及非本次请求协议本地剔除；因此请求 https 时若池内无真实 https 会返回 0（`code=12009` 静默跳过）而非错标成 http
+- **提量靠 `level_type` 分桶并集**：单查固定只回 100 条且重复调用不轮换（第 2 次起全是旧数据），故按匿名等级 `LEVELS=(1,2,3,4,5)`（高匿/普匿/匿名/透明/未知）逐桶请求再并集，各桶独立 ≤100；实测国内 http 约 204 条、海外 http 约 302 条（单查仅 100）。想关闭分桶把 `LEVELS` 设为 `(None,)` 即可
+- **本源无真实 https**：国内/海外池的 https 均返回 0，只能提供 http；需要 https 代理请依赖 proxyfreeonly
 
-**六六代理 说明**（https://www.66daili.com/）：
-- **仅国内代理**：官网地区分类只有中国省份，国外权重为 None，`region='abroad'` 时自动跳过此源
-- API 无地区/协议过滤参数，每次返回 60 条；实测限流较严（频繁 429"请求次数过多"）
-
-**云代理 说明**（http://www.ip3366.net/）：
-- **仅国内代理**：爬取国内高匿页（stype=1），实测 100% 中国 IP，国外权重为 None，`region='abroad'` 时自动跳过此源
+**proxyfreeonly代理 说明**（https://proxyfreeonly.com/）：
+- **国内外均有**：走前端数据接口 `https://proxyfreeonly.com/api/data/proxy-list`，`GET ?page=1&limit=200&locale=en&where={"country":"china","protocols":"http"}`，返回 `{"items":[...],"totalItems":N}`，**裸请求即可（无需 cookie / CF 盾）**
+- **`where.country`（用 slug，如 `china`/`united-states`）、`where.protocols` 与 `limit`/`page` 全部服务端生效**，可分页只取需要的小量（比全量接口 `api/free-proxy-list` 高效得多）：`china` 约 219(http)/21(https) 条一次拉完
+- `region='china'` 传 `where.country='china'`；`abroad`/全选只按 `protocols` 请求全国家，再本地排除 CN 与噪声国家 `NOISE`（默认 `LU`，一家占 1.3 万条机房代理）；每协议最多翻 `MAX_PAGES`（默认 5）页 × `PAGE_LIMIT`（默认 200）
+- 质量：CN http/https 本机实测 https 隧道存活约 17%、明文约 24%，延迟亚秒，是国内免费源里较好的一档；全球池被 LU 机房代理稀释、跨境延迟 5~10s 且存活极低，故国外权重下调为 1
 
 ---
 
@@ -250,4 +246,4 @@ ProxyPool.register_source(MyProxySite)
 2. **自动去重**：检测和导出时均自动去重
 3. **代理池为空**：`get_proxy()` 在无可用代理时，`getNum=1` 返回 `None`、`getNum>1` 返回 `[]`
 4. **延迟排序**：`main()` 结束后 `availableProxy` 已按延迟升序排列，`get_proxy()` 返回其中延迟最低（最优）的一条或多条
-5. **超时设置**：所有HTTP请求默认超时6秒
+5. **超时设置**：代理可用性检测请求超时 6 秒；各代理源拉取列表的超时不同（站大爷 10s、proxyfreeonly 25s，响应较大）
