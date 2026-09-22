@@ -75,12 +75,12 @@ proxies = ProxyPool.main(total=5, sources=['站大爷代理'])
 
 ### `ProxyPool.get_proxy()`
 
-快捷获取代理（类方法）：相当于调用 `main()` 检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条。面向快速取用，内部固定 `retest=False`，不做二次筛选。
+快捷获取代理（类方法）：相当于调用 `main()` 检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条。默认 `retest=False`（快速取用不复审），需要更高稳定性可置 `True`。
 
 **签名：**
 
 ```python
-get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8)
+get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=False)
 ```
 
 **参数：**
@@ -92,6 +92,7 @@ get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8)
 | `filter` | tuple | None | 过滤条件 `(region, protocol)`，同 `main()` |
 | `sources` | list | None | 代理源名称列表，同 `main()` |
 | `maxWorks` | int | 8 | 同 `main()` |
+| `retest` | bool | False | 是否二次筛选，同 `main()`；默认关闭以保证快速取用 |
 
 **返回值：**
 - `getNum=1`：返回 `{'http': 'http://ip:port', 'https': 'http://ip:port'}`（可直接传给 `requests` 的 `proxies` 参数）；无可用返回 `None`
@@ -127,7 +128,7 @@ export(fmt='txt', filepath=None)
 | `fmt` | str | 'txt' | 导出格式，可选：`txt`、`json`、`jsonl` |
 | `filepath` | str | None | 导出路径，None=当前目录 `proxies.{fmt}` |
 
-**返回值：** `str` —— 导出内容的字符串；无可用代理时不导出并返回 `None`
+**返回值：** 无（`None`）—— 直接将代理写入文件并打印导出条数；无可用代理时不写文件。
 
 **示例：**
 

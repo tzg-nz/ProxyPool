@@ -423,15 +423,13 @@ class ProxyPool:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         print(f'✅已导出 {len(seen)} 条不重复代理到 {filepath}')
-        return content
 
     # ==================== 获取代理 ====================
 
     @classmethod
-    def get_proxy(cls, getNum=1, testNum=5, filter=None, sources=None, maxWorks=8):
+    def get_proxy(cls, getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=False):
         """
         快捷获取代理：相当于调用 main() 检测出 testNum 条可用代理，再取延迟最低（最优）的 getNum 条
-        （get_proxy 面向快速取用，固定不做二次筛选）
 
         :param getNum: 最终获取的代理数量，默认1
         :param testNum: 检测的可用代理数量，默认5（先检测出5条，再从中取最优的）
@@ -440,6 +438,7 @@ class ProxyPool:
             protocol: 'http'/'https'/('http','https')/None(全部)
         :param sources: 代理源名称列表，None=使用全部，同 main()
         :param maxWorks: 并发检测线程数，同 main()
+        :param retest: 是否二次筛选，同 main()；默认 False（快速取用不复审），需要更高稳定性可置 True
         :return: getNum=1 时返回 {'http': 'http://ip:port', 'https': 'http://ip:port'}；
                  getNum>1 时返回字典列表；无可用代理时 getNum=1 返回 None、getNum>1 返回 []
 
@@ -451,7 +450,7 @@ class ProxyPool:
             # 只要国内http代理，检测出5条后取最优3条
             proxies = ProxyPool.get_proxy(getNum=3, testNum=5, filter=('china', 'http'))
         """
-        available = cls.main(total=testNum, filter=filter, sources=sources, maxWorks=maxWorks, retest=False)
+        available = cls.main(total=testNum, filter=filter, sources=sources, maxWorks=maxWorks, retest=retest)
         if not available:
             print('⚠️ 没有可用代理')
             return None if getNum == 1 else []
