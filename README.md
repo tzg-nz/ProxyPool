@@ -75,12 +75,12 @@ proxies = ProxyPool.main(total=5, sources=['站大爷代理'])
 
 ### `ProxyPool.get_proxy()`
 
-快捷获取代理（类方法）：相当于调用 `main()` 检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条。默认 `retest=False`（快速取用不复审），需要更高稳定性可置 `True`。
+快捷获取代理（类方法）：相当于调用 `main()` 检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条。默认 `retest=True`（对首轮存活代理复测，只留两次都通过的，更稳），不需要可置 `False`。
 
 **签名：**
 
 ```python
-get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=False)
+get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=True)
 ```
 
 **参数：**
@@ -92,7 +92,7 @@ get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=Fal
 | `filter` | tuple | None | 过滤条件 `(region, protocol)`，同 `main()` |
 | `sources` | list | None | 代理源名称列表，同 `main()` |
 | `maxWorks` | int | 8 | 同 `main()` |
-| `retest` | bool | False | 是否二次筛选，同 `main()`；默认关闭以保证快速取用 |
+| `retest` | bool | True | 是否二次筛选，同 `main()`；默认开启对首轮存活代理复测，只留两次都通过的 |
 
 **返回值：**
 - `getNum=1`：返回 `{'http': 'http://ip:port', 'https': 'http://ip:port'}`（可直接传给 `requests` 的 `proxies` 参数）；无可用返回 `None`

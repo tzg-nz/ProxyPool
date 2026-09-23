@@ -423,7 +423,7 @@ class ProxyPool:
     # ==================== 获取代理 ====================
 
     @classmethod
-    def get_proxy(cls, getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=False):
+    def get_proxy(cls, getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=True):
         """
         快捷获取代理：相当于调用 main() 检测出 testNum 条可用代理，再取延迟最低（最优）的 getNum 条
 
@@ -434,7 +434,7 @@ class ProxyPool:
             protocol: 'http'/'https'/('http','https')/None(全部)
         :param sources: 代理源名称列表，None=使用全部，同 main()
         :param maxWorks: 并发检测线程数，同 main()
-        :param retest: 是否二次筛选，同 main()；默认 False（快速取用不复审），需要更高稳定性可置 True
+        :param retest: 是否二次筛选，同 main()；默认 True（对首轮存活代理复测，只留两次都通过的，更稳），不需要可置 False
         :return: getNum=1 时返回 {'http': 'http://ip:port', 'https': 'http://ip:port'}；
                  getNum>1 时返回字典列表；无可用代理时 getNum=1 返回 None、getNum>1 返回 []
 
@@ -605,4 +605,4 @@ ProxyPool.register_source(ProxyPool.ZdyProxyPool)
 ProxyPool.register_source(ProxyPool.ProxyFreeOnlyProxyPool)
 
 if __name__ == '__main__':
-    ProxyPool.main()
+    ProxyPool.get_proxy(retest=True)
