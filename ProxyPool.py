@@ -129,6 +129,7 @@ class ProxyPool:
         """
         self.total = total
         self.sources = sources
+        self._sessionBase = 0  # 本次会话已累计送入检测的代理数（逐源调用间累加，用于进度/可用分母）
         # 解析filter元组
         if filter is None:
             self.region = None
@@ -236,12 +237,18 @@ class ProxyPool:
         if total_count == 0:
             return
 
-        target = self.total or total_count
+        # 逐源分别调用本方法时，available 是跨源累计的，进度/可用分母也须用「含前面各源」的累计总数，
+        # 否则到第 2 个站点会出现「可用 100/1966」这种分子累计、分母只算当前源的错位数字
+        base = self._sessionBase  # 本次调用前已累计检测的代理数（同一会话内跨源累加）
+        self._sessionBase = base + total_count
+        cum_total = self._sessionBase  # 含本次的累计总数
+        target = self.total  # 硬性目标；None 表示全量，不做早停
+        display_total = target if target else cum_total  # 「可用 x/」的分母
         checked = [0]
         available = ProxyPool.availableProxy
 
         for srcName, proxyList in sourceProxyMap.items():
-            if len(available) >= target:
+            if target and len(available) >= target:
                 break
             if not proxyList:
                 continue
@@ -257,19 +264,20 @@ class ProxyPool:
                         continue
                     with ProxyPool._lock:
                         checked[0] += 1
+                        prog = f'进度 {base + checked[0]}/{cum_total}'
                         if res is None:
-                            print(f'❌ 无效 | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
+                            print(f'❌ 无效 | {prog} | 可用 {len(available)}/{display_total}')
                             continue
-                        if len(available) >= target:
+                        if target and len(available) >= target:
                             executor.shutdown(wait=False, cancel_futures=True)
                             return
                         if res in available:
-                            print(f'⚠️ {res} 重复 | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
+                            print(f'⚠️ {res} 重复 | {prog} | 可用 {len(available)}/{display_total}')
                             continue
                         available.append(res)
                         ProxyPool._proxyLatency[res] = elapsed
-                        print(f'✅ {res} ({elapsed:.0f}ms) | 进度 {checked[0]}/{total_count} | 可用 {len(available)}/{target}')
-                        if len(available) >= target:
+                        print(f'✅ {res} ({elapsed:.0f}ms) | {prog} | 可用 {len(available)}/{display_total}')
+                        if target and len(available) >= target:
                             print(f'\n✅已达目标数量 {target}')
                             executor.shutdown(wait=False, cancel_futures=True)
                             return
@@ -354,6 +362,7 @@ class ProxyPool:
             cls._proxyLatency = {}
             savedTotal = instance.total
             instance.total = None
+            instance._sessionBase = 0  # 复测是独立一组，分母重新从 0 累计
             instance._checkProxies(reMap, maxWorks)
             instance.total = savedTotal
 
