@@ -140,13 +140,14 @@ class ProxyPool:
 
     @classmethod
     def _checkTestUrls(cls):
-        """从候选池顶部往下测，选第一个可用的作为本次唯一测速站点（不逐个全测）"""
+        """从候选池顶部往下测，逐个输出可用情况，命中第一个可用即作为本次唯一测速站点并单独提示（不再逐个全测）"""
         for url in cls._TEST_URLS_POOL:
             try:
                 resp = requests.get(url, timeout=6)
                 if resp.ok:
+                    print(f'✅测速网站可用：{url}')
                     cls._TEST_URLS = [url]
-                    print(f'✅当前测速网站：{url}')
+                    print(f'🌐 当前测速网站：{url}\n')
                     return
                 print(f'❌测速网站不可用：{url} (状态码 {resp.status_code})')
             except Exception as e:
