@@ -316,9 +316,10 @@ class ProxyPool:
         # 1. 解析代理源顺序（按权重降序，跳过无该地区的源）——此处不预爬
         region_str = instance.region or '全部'
         proto_str = ','.join(instance.protocols) if instance.protocols else '全部'
+        src_str = '全部' if not sources else '、'.join(cls._sourceName(s) for s in sources)
         print('=' * 80)
         print(
-            f'地区：{region_str} | 协议：{proto_str} | 代理源：{sources or "全部"} | 目标数量：{total or "不限"} | 二次筛选：{"开启" if retest else "关闭"}')
+            f'地区：{region_str} | 协议：{proto_str} | 代理源：{src_str} | 目标数量：{total or "不限"} | 二次筛选：{"开启" if retest else "关闭"}')
         print('=' * 80)
         sortedSources = instance._resolveSources()
 
@@ -708,5 +709,5 @@ ProxyPool.register_source(ProxyPool.ZdyProxyPool)
 ProxyPool.register_source(ProxyPool.ProxyFreeOnlyProxyPool)
 
 if __name__ == '__main__':
-    ProxyPool.main()
+    ProxyPool.main(sources=['ZdyProxyPool'])
     ProxyPool.export()
