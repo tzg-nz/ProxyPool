@@ -98,7 +98,8 @@ class ProxyPool:
     _proxySource = {}  # proxy -> 来源代理源名称
     _lock = threading.Lock()
 
-    _TEST_URLS = ['https://icanhazip.com/', 'https://myip.ipip.net/', 'https://api.ip.sb/ip']
+    _TEST_URLS_POOL = ['https://icanhazip.com/', 'https://myip.ipip.net/', 'https://api.ip.sb/ip']  # 候选测速网站
+    _TEST_URLS = _TEST_URLS_POOL  # 当前生效的测速网站（_checkTestUrls 会收窄为其中第一个可用的）
 
     _UALIST = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -139,22 +140,18 @@ class ProxyPool:
 
     @classmethod
     def _checkTestUrls(cls):
-        """验证测速网站是否可用，移除不可用的"""
-        available = []
-        for url in cls._TEST_URLS:
+        """从候选池顶部往下测，选第一个可用的作为本次唯一测速站点（不逐个全测）"""
+        for url in cls._TEST_URLS_POOL:
             try:
                 resp = requests.get(url, timeout=6)
                 if resp.ok:
-                    print(f'✅测速网站可用：{url}')
-                    available.append(url)
-                else:
-                    print(f'❌测速网站不可用：{url} (状态码 {resp.status_code})')
+                    cls._TEST_URLS = [url]
+                    print(f'✅当前测速网站：{url}')
+                    return
+                print(f'❌测速网站不可用：{url} (状态码 {resp.status_code})')
             except Exception as e:
                 print(f'❌测速网站不可用：{url} ({type(e).__name__})')
-        if not available:
-            raise Exception('⚠️所有测速网站均不可用，无法检测代理')
-        cls._TEST_URLS = available
-        print()
+        raise Exception('⚠️所有测速网站均不可用，无法检测代理')
 
     # ==================== 代理获取 ====================
 
@@ -484,7 +481,7 @@ class ProxyPool:
             sourceMap.setdefault(name, []).append(proxy)
 
         print('=' * 80)
-        print(f'读取 {filepath}：解析到 {len(seen)} 条不重复代理，开始测速（目标 {total or "全部"}，不二次筛选）')
+        print(f'读取 {filepath}：解析到 {len(seen)} 条不重复代理，开始测速（目标 {total or "全部"}）')
         print('=' * 80)
         if not seen:
             print('⚠️文件无有效代理')

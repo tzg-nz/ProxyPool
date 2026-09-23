@@ -269,6 +269,8 @@ ProxyPool.register_source(MyProxySite)
 
 ## 测试网址
 
+候选测速站点按下列顺序排列，每次检测**从顶部往下测，命中第一个可用的即作为本次唯一测速站点**（不再逐个全测），并在开头输出 `✅当前测速网站：{url}`：
+
 - https://icanhazip.com/
 - https://myip.ipip.net/
 - https://api.ip.sb/ip
@@ -280,5 +282,5 @@ ProxyPool.register_source(MyProxySite)
 1. **并发检测**：默认8线程并发，`maxWorks` 参数可调整
 2. **自动去重**：检测和导出时均自动去重
 3. **代理池为空**：`get_proxy()` 在无可用代理时，`getNum=1` 返回 `None`、`getNum>1` 返回 `[]`
-4. **延迟排序**：`main()` 结束后 `availableProxy` 已按延迟升序排列，`get_proxy()` 返回其中延迟最低（最优）的一条或多条
+4. **延迟测量与排序**：延迟取自 requests 内置的 `response.elapsed`（请求发出到下载完成的耗时，毫秒）；`main()` 结束后 `availableProxy` 已按延迟升序排列，`get_proxy()` 返回其中延迟最低（最优）的一条或多条
 5. **超时设置**：代理可用性检测请求超时 6 秒；各代理源拉取列表的超时不同（站大爷 10s、proxyfreeonly 25s，响应较大）
