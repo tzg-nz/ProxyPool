@@ -172,8 +172,8 @@ class ProxyPool:
             print(f'[{sourceName}] 获取失败：{e}')
             return []
 
-    def _fetchAllProxies(self):
-        """按权重降序串行获取，返回有序的 {源名: [代理,...]}（跨源去重）"""
+    def _resolveSources(self):
+        """按权重降序解析待用代理源名称列表（含跳过无该地区的源），不在此爬取"""
         sourceNames = self.sources or list(self._SOURCES.keys())
         # 单选地区时，跳过该地区权重为None的源（该源没有此地区代理，爬了也是浪费请求）
         if self.region is not None:
@@ -183,7 +183,7 @@ class ProxyPool:
             sourceNames = [n for n in sourceNames if n not in skipped]
             if not sourceNames:
                 print(f'⚠️ 指定的代理源均无{"国外" if self.region == "abroad" else "国内"}代理，无法获取')
-                return {}
+                return []
 
         # 按权重降序排列，高权重优先爬取（单选地区用对应地区权重，全选用综合权重）
         sortedSources = sorted(
@@ -194,22 +194,7 @@ class ProxyPool:
         weightDesc = '综合' if self.region is None else ('国内' if self.region == 'china' else '国外')
         weightStr = ' > '.join(f'{s}({ProxyPool._getWeight(s, self.region):g})' for s in sortedSources)
         print(f'权重模式({weightDesc}权重优先)：{weightStr}')
-
-        sourceProxyMap = {}
-        seen = set()
-        for name in sortedSources:
-            proxies = self._fetchFromSource(name)
-            dedup = []
-            for p in proxies:
-                if p not in seen:
-                    seen.add(p)
-                    dedup.append(p)
-                    ProxyPool._proxySource[p] = name
-            sourceProxyMap[name] = dedup
-
-        print(f'\n共获取 {len(seen)} 条不重复代理')
-        ProxyPool.allProxy = [p for lst in sourceProxyMap.values() for p in lst]
-        return sourceProxyMap
+        return sortedSources
 
     # ==================== 代理检测 ====================
 
@@ -231,20 +216,16 @@ class ProxyPool:
         return (None, 0)
 
     def _checkProxies(self, sourceProxyMap, maxWorks=8):
-        """按权重顺序逐源并发检测，累计达到total即停
-        :param sourceProxyMap: 有序的 {源名: [代理,...]}，源名只在该批开始打印一次
+        """并发检测 sourceProxyMap 内的代理，累计达到 total 即停
+        :param sourceProxyMap: 有序的 {源名: [代理,...]}，每源开始处打印一次网站名
         """
         total_count = sum(len(v) for v in sourceProxyMap.values())
         if total_count == 0:
-            print('⚠️没有代理需要检测')
             return
 
         target = self.total or total_count
         checked = [0]
         available = ProxyPool.availableProxy
-
-        print(f'开始检测 {total_count} 条代理，目标 {target} 条，并发 {maxWorks} 线程')
-        print('-' * 80)
 
         for srcName, proxyList in sourceProxyMap.items():
             if len(available) >= target:
@@ -299,7 +280,7 @@ class ProxyPool:
     @classmethod
     def main(cls, total=None, filter=None, sources=None, maxWorks=8, retest=True):
         """
-        获取并验证代理（始终按权重优先：高权重源先爬先检测）
+        获取并验证代理（按权重逐源「爬→测」，累计达到 total 即停，达标后面的源不再爬取）
 
         :param total: 需要的可用代理总数，达到即停（None=全量检测）
         :param filter: 过滤条件元组 (region, protocol)
@@ -325,24 +306,39 @@ class ProxyPool:
         print('=' * 80)
         cls._checkTestUrls()
 
-        # 1. 从所有代理源按权重串行获取代理
+        # 1. 解析代理源顺序（按权重降序，跳过无该地区的源）——此处不预爬
         region_str = instance.region or '全部'
         proto_str = ','.join(instance.protocols) if instance.protocols else '全部'
         print('=' * 80)
         print(
             f'地区：{region_str} | 协议：{proto_str} | 代理源：{sources or "全部"} | 目标数量：{total or "不限"} | 二次筛选：{"开启" if retest else "关闭"}')
         print('=' * 80)
-        sourceProxyMap = instance._fetchAllProxies()
+        sortedSources = instance._resolveSources()
 
-        # 2. 第一次检测：按权重顺序逐源并发检测
+        # 2. 第一次筛选：按权重逐源"爬→测"，够数即停（达标的后续源不再爬取）
         if retest:
             print('\n' + '=' * 80)
             print('第一次筛选'.center(80))
             print('=' * 80)
         else:
-            print('\n开始检测代理可用性...')
+            print('\n开始逐源获取并检测代理...')
             print('=' * 80)
-        instance._checkProxies(sourceProxyMap, maxWorks)
+        available = cls.availableProxy
+        seen = set()
+        for name in sortedSources:
+            if total and len(available) >= total:
+                break
+            proxies = instance._fetchFromSource(name)
+            batch = []
+            for p in proxies:
+                if p not in seen:
+                    seen.add(p)
+                    cls._proxySource[p] = name
+                    batch.append(p)
+            cls.allProxy.extend(batch)
+            if not batch:
+                continue
+            instance._checkProxies({name: batch}, maxWorks)
 
         # 3. 二次筛选：对第一次存活的代理复测，只保留两次都通过的（剔除抖动/偶发可用）
         if retest and cls.availableProxy:
@@ -609,5 +605,4 @@ ProxyPool.register_source(ProxyPool.ZdyProxyPool)
 ProxyPool.register_source(ProxyPool.ProxyFreeOnlyProxyPool)
 
 if __name__ == '__main__':
-    proxies = ProxyPool.main(total=5, filter=('china', None), retest=False)
-    ProxyPool.export(fmt='jsonl')
+    ProxyPool.main()
