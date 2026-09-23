@@ -205,11 +205,10 @@ class ProxyPool:
         proxies = {'http': proxy_url, 'https': proxy_url}
         for testUrl in self._TEST_URLS:
             try:
-                start = time.time()
                 response = requests.get(testUrl, proxies=proxies, timeout=6)
-                elapsed = (time.time() - start) * 1000
                 if response.ok:
-                    return (proxy, elapsed)
+                    # 用 requests 内置的 response.elapsed（请求发出到响应内容下载的耗时）
+                    return (proxy, response.elapsed.total_seconds() * 1000)
                 return (None, 0)
             except Exception:
                 return (None, 0)
@@ -372,7 +371,7 @@ class ProxyPool:
     # ==================== 导出 ====================
 
     @classmethod
-    def export(cls, fmt='txt', filepath=None):
+    def export(cls, fmt='jsonl', filepath=None):
         if fmt not in cls.SUPPORTFORMAT:
             raise ValueError(f'不支持的导出格式: {fmt}，可选: {cls.SUPPORTFORMAT}')
 
@@ -419,6 +418,92 @@ class ProxyPool:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         print(f'✅已导出 {len(seen)} 条不重复代理到 {filepath}')
+
+    # ==================== 读取文件并测速 ====================
+
+    @staticmethod
+    def _ensure_scheme(proxy):
+        """补全协议前缀；无 :// 视为 http，返回去空白的代理串（非法则返回 ''）"""
+        proxy = (proxy or '').strip()
+        if not proxy:
+            return ''
+        if '://' not in proxy:
+            proxy = f'http://{proxy}'
+        return proxy
+
+    @classmethod
+    def check_file(cls, filepath=None, total=None, maxWorks=8):
+        """
+        读取已导出的 jsonl 代理文件并逐个测速（单次检测，不做二次筛选）。
+        结果写入全局状态（availableProxy / _proxyLatency / _proxySource），
+        因此测完后照常可调用 export() 重新导出。
+
+        :param filepath: 代理 jsonl 文件路径，None=当前目录 proxies.jsonl
+        :param total: 需要的可用代理数量，达到即停；None=全部检测
+        :param maxWorks: 并发检测线程数
+        :return: 可用代理列表（按延迟升序）
+
+        jsonl 每行形如 {"source","protocol","proxy","latency_ms"}
+        """
+        if filepath is None:
+            filepath = os.path.join(os.getcwd(), 'proxies.jsonl')
+        if not os.path.isfile(filepath):
+            print(f'❌文件不存在：{filepath}')
+            return []
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+            text = f.read()
+
+        # 解析为 (proxy, source) 列表
+        pairs = []
+        try:
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                pairs.append((cls._ensure_scheme(obj.get('proxy', '')), obj.get('source', '')))
+        except Exception as e:
+            print(f'❌解析文件失败（jsonl）：{e}')
+            return []
+
+        # 重置状态并按来源分组去重
+        cls.allProxy = []
+        cls.availableProxy = []
+        cls._proxyLatency = {}
+        cls._proxySource = {}
+        seen = set()
+        sourceMap = {}
+        for proxy, src in pairs:
+            if not proxy or proxy in seen:
+                continue
+            seen.add(proxy)
+            name = src or '文件导入'
+            cls.allProxy.append(proxy)
+            cls._proxySource[proxy] = name
+            sourceMap.setdefault(name, []).append(proxy)
+
+        print('=' * 80)
+        print(f'读取 {filepath}：解析到 {len(seen)} 条不重复代理，开始测速（目标 {total or "全部"}，不二次筛选）')
+        print('=' * 80)
+        if not seen:
+            print('⚠️文件无有效代理')
+            return []
+
+        cls._checkTestUrls()
+        instance = cls(total)
+        instance._checkProxies(sourceMap, maxWorks)
+
+        # 按延迟排序，最快的在前
+        cls.availableProxy.sort(key=lambda p: cls._proxyLatency.get(p, float('inf')))
+        print(f'\n{"=" * 80}')
+        print(f'测速完成，共 {len(cls.availableProxy)} 条可用代理（按延迟排序）')
+        for i, p in enumerate(cls.availableProxy, 1):
+            latency = cls._proxyLatency.get(p, 0)
+            src = cls._proxySource.get(p, '?')
+            print(f'  {i}. [{src}] {p} ({latency:.0f}ms)')
+        print('=' * 80)
+        return cls.availableProxy
 
     # ==================== 获取代理 ====================
 
@@ -605,4 +690,4 @@ ProxyPool.register_source(ProxyPool.ZdyProxyPool)
 ProxyPool.register_source(ProxyPool.ProxyFreeOnlyProxyPool)
 
 if __name__ == '__main__':
-    ProxyPool.get_proxy(retest=True)
+    ProxyPool.check_file()

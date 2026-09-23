@@ -118,14 +118,14 @@ proxies = ProxyPool.get_proxy(getNum=3, testNum=5, filter=('china', 'http'))
 **签名：**
 
 ```python
-export(fmt='txt', filepath=None)
+export(fmt='jsonl', filepath=None)
 ```
 
 **参数：**
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `fmt` | str | 'txt' | 导出格式，可选：`txt`、`json`、`jsonl` |
+| `fmt` | str | 'jsonl' | 导出格式，可选：`txt`、`json`、`jsonl` |
 | `filepath` | str | None | 导出路径，None=当前目录 `proxies.{fmt}` |
 
 **返回值：** 无（`None`）—— 直接将代理写入文件并打印导出条数；无可用代理时不写文件。
@@ -135,11 +135,44 @@ export(fmt='txt', filepath=None)
 ```python
 ProxyPool.main(total=10)
 
-# 默认导出 txt 到当前目录 proxies.txt
+# 默认导出 jsonl 到当前目录 proxies.jsonl
 ProxyPool.export()
 
 # 导出 json 到指定路径
 ProxyPool.export(fmt='json', filepath=r'D:\out\proxies.json')
+```
+
+---
+
+### `ProxyPool.check_file()`
+
+读取已导出的 **jsonl** 代理文件并逐个测速（类方法）。单次检测、**不做二次筛选**；测速结果写入全局状态（`availableProxy` / `_proxyLatency` / `_proxySource`），因此**测完后照常可调用 `export()` 重新导出**。适用于把历史导出的代理池重新过一遍时效。
+
+**签名：**
+
+```python
+check_file(filepath=None, total=None, maxWorks=8)
+```
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `filepath` | str | None | jsonl 文件路径，None=当前目录 `proxies.jsonl` |
+| `total` | int | None | 需要的可用代理数量，达到即停；None=全部检测 |
+| `maxWorks` | int | 8 | 并发检测线程数，同 `main()` |
+
+**返回值：** `list` —— 测速通过的可用代理（按延迟升序）；文件不存在或无有效代理返回 `[]`。
+
+**示例：**
+
+```python
+# 读取默认 proxies.jsonl 并测速，测完再导出为新文件
+avail = ProxyPool.check_file()
+ProxyPool.export(filepath=r'D:\out\proxies_checked.jsonl')
+
+# 指定文件、只要前 20 条通过即停
+ProxyPool.check_file(filepath=r'D:\out\proxies.jsonl', total=20)
 ```
 
 ---
