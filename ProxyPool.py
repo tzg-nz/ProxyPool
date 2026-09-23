@@ -98,7 +98,7 @@ class ProxyPool:
     _proxySource = {}  # proxy -> 来源代理源名称
     _lock = threading.Lock()
 
-    _TEST_URLS_POOL = ['https://icanhazip.com/', 'https://myip.ipip.net/', 'https://api.ip.sb/ip']  # 候选测速网站
+    _TEST_URLS_POOL = ['https://myip.ipip.net/', 'https://icanhazip.com/', 'https://api.ip.sb/ip']  # 候选测速网站
     _TEST_URLS = _TEST_URLS_POOL  # 当前生效的测速网站（_checkTestUrls 会收窄为其中第一个可用的）
 
     _UALIST = [
@@ -145,9 +145,9 @@ class ProxyPool:
             try:
                 resp = requests.get(url, timeout=6)
                 if resp.ok:
-                    print(f'✅测速网站可用：{url}')
+                    print(f'✅测速网站可用：{url}\n')
                     cls._TEST_URLS = [url]
-                    print(f'🌐 当前测速网站：{url}\n')
+                    print(f'🚀当前测速网站：{url}')
                     return
                 print(f'❌测速网站不可用：{url} (状态码 {resp.status_code})')
             except Exception as e:
