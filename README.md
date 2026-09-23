@@ -24,7 +24,7 @@ main(total=None, filter=None, sources=None, maxWorks=8, retest=True)
 |------|------|--------|------|
 | `total` | int | None | 需要的可用代理总数，达到即停（None=全量检测） |
 | `filter` | tuple | None | 过滤条件，格式 `(region, protocol)`，详见下方 |
-| `sources` | list | None | 代理源名称列表，None=使用全部注册源 |
+| `sources` | list | None | 代理源**类名**列表（如 `['ZdyProxyPool']`），None=使用全部注册源 |
 | `maxWorks` | int | 8 | 并发检测线程数 |
 | `retest` | bool | True | 是否二次筛选：True=对第一次存活的代理再复测一遍，只保留两次都通过的（更稳定，输出分「第一次筛选 / 第二次筛选」两段）；False=单次检测 |
 
@@ -67,20 +67,20 @@ proxies = ProxyPool.main(total=10, filter=(None, 'http'))
 # 全量检测，不限条件
 proxies = ProxyPool.main()
 
-# 只使用指定代理源
-proxies = ProxyPool.main(total=5, sources=['站大爷代理'])
+# 只使用指定代理源（按类名传）
+proxies = ProxyPool.main(total=5, sources=['ZdyProxyPool'])
 ```
 
 ---
 
 ### `ProxyPool.get_proxy()`
 
-快捷获取代理（类方法）：相当于调用 `main()` 检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条。默认 `retest=True`（对首轮存活代理复测，只留两次都通过的，更稳），不需要可置 `False`。
+快捷获取代理（类方法）：默认调用 `main()` 联网检测出 `testNum` 条可用代理，再取延迟最低（最优）的 `getNum` 条；默认 `retest=True`（对首轮存活代理复测，只留两次都通过的，更稳），不需要可置 `False`。若指定 `filepath`，则改为**从本地 jsonl 文件读取代理测速**（等价于走 `check_file`），此时 `filter`/`sources`/`retest` 均不生效。
 
 **签名：**
 
 ```python
-get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=True)
+get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=True, filepath=None)
 ```
 
 **参数：**
@@ -89,10 +89,11 @@ get_proxy(getNum=1, testNum=5, filter=None, sources=None, maxWorks=8, retest=Tru
 |------|------|--------|------|
 | `getNum` | int | 1 | 最终获取的代理数量 |
 | `testNum` | int | 5 | 检测的可用代理数量（先检测出5条，再从中取最优） |
-| `filter` | tuple | None | 过滤条件 `(region, protocol)`，同 `main()` |
-| `sources` | list | None | 代理源名称列表，同 `main()` |
+| `filter` | tuple | None | 过滤条件 `(region, protocol)`，同 `main()`；`filepath` 模式下忽略 |
+| `sources` | list | None | 代理源**类名**列表（如 `['ZdyProxyPool']`），同 `main()`；`filepath` 模式下忽略 |
 | `maxWorks` | int | 8 | 同 `main()` |
-| `retest` | bool | True | 是否二次筛选，同 `main()`；默认开启对首轮存活代理复测，只留两次都通过的 |
+| `retest` | bool | True | 是否二次筛选，同 `main()`；默认开启对首轮存活代理复测，只留两次都通过的；`filepath` 模式下忽略 |
+| `filepath` | str | None | 本地 jsonl 代理文件路径；None=联网获取，指定则从该文件读取并测速（`check_file`） |
 
 **返回值：**
 - `getNum=1`：返回 `{'http': 'http://ip:port', 'https': 'http://ip:port'}`（可直接传给 `requests` 的 `proxies` 参数）；无可用返回 `None`
@@ -222,6 +223,8 @@ http://5.6.7.8:3128
 | 站大爷代理 | `ZdyProxyPool` | 3 | 3 | 3 |
 | proxyfreeonly代理 | `ProxyFreeOnlyProxyPool` | 2 | 1 | 1.5 |
 
+> `sources` 参数按**类名**（表中"类名"列）传入，例如 `sources=['ZdyProxyPool']`；名称列仅用于运行输出展示。
+
 ### 权重机制（国内/国外双权重）
 
 每个代理源配置 `WEIGHT = (国内权重, 国外权重)`（也可写单一数字表示国内外统一）：
@@ -251,8 +254,8 @@ http://5.6.7.8:3128
 继承 `ProxyPool.CustomProxySource` 并实现 `fetch` 方法，然后注册：
 
 ```python
-class MyProxySite(ProxyPool.CustomProxySource):
-    NAME = '我的代理网站'
+class MyProxySite(ProxyPool.CustomProxySource):  # 注册表以类名 MyProxySite 为键，sources 传 ['MyProxySite']
+    NAME = '我的代理网站'  # 仅用于运行输出展示
     WEIGHT = (4, 3)  # (国内权重, 国外权重)，综合权重=平均值；某项None表示没有该地区代理
                      # 也可写单一数字表示国内外统一
 
