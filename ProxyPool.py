@@ -237,14 +237,12 @@ class ProxyPool:
         if total_count == 0:
             return
 
-        # 逐源分别调用本方法时，available 是跨源累计的，进度/可用分母也须用「含前面各源」的累计总数，
+        # 进度按「每个站点自身数量」单独计（每源从 0 重新计）；可用则跨源累计，其分母用「含前面各源」的累计总数，
         # 否则到第 2 个站点会出现「可用 100/1966」这种分子累计、分母只算当前源的错位数字
-        base = self._sessionBase  # 本次调用前已累计检测的代理数（同一会话内跨源累加）
-        self._sessionBase = base + total_count
+        self._sessionBase += total_count
         cum_total = self._sessionBase  # 含本次的累计总数
         target = self.total  # 硬性目标；None 表示全量，不做早停
         display_total = target if target else cum_total  # 「可用 x/」的分母
-        checked = [0]
         available = ProxyPool.availableProxy
 
         for srcName, proxyList in sourceProxyMap.items():
@@ -253,7 +251,9 @@ class ProxyPool:
             if not proxyList:
                 continue
             # 按权重逐源检测，故只在每源开始处标明网站，后续每行不再重复来源
-            print(f'\n🌐 {srcName}（{len(proxyList)} 条）')
+            src_count = len(proxyList)
+            print(f'\n🌐 {srcName}（{src_count} 条）')
+            checked = 0  # 进度按本站自身数量单独计，每源归零
             with ThreadPoolExecutor(max_workers=maxWorks) as executor:
                 # 一次性提交全部，线程池按 maxWorks 上限滚动执行；as_completed 谁先完成先处理，消除批间栅栏
                 futures = {executor.submit(self._testProxy, p, target): p for p in proxyList}
@@ -263,8 +263,8 @@ class ProxyPool:
                     except Exception:
                         continue
                     with ProxyPool._lock:
-                        checked[0] += 1
-                        prog = f'进度 {base + checked[0]}/{cum_total}'
+                        checked += 1
+                        prog = f'进度 {checked}/{src_count}'
                         if res is None:
                             print(f'❌ 无效 | {prog} | 可用 {len(available)}/{display_total}')
                             continue
@@ -674,6 +674,7 @@ class ProxyPool:
                 if region == 'china':
                     where['country'] = 'china'  # 接口用 slug 而非 ISO-2 码
                 whereStr = json.dumps(where, separators=(',', ':'))
+                failPages = 0  # 该协议累计失败页数：偶发超时只跳过该页继续往后翻，累计满3页才停止本协议翻页
                 for page in range(1, ProxyPool.ProxyFreeOnlyProxyPool.MAX_PAGES + 1):
                     params = {'page': page, 'limit': ProxyPool.ProxyFreeOnlyProxyPool.PAGE_LIMIT,
                               'locale': 'en', 'where': whereStr}
@@ -687,8 +688,12 @@ class ProxyPool:
                         )
                         j = response.json()
                     except Exception as e:
-                        print(f'[proxyfreeonly代理] 第{page}页获取失败：{e}')
-                        break
+                        failPages += 1
+                        print(f'[proxyfreeonly代理] 第{page}页获取失败({failPages}/3)：{e}')
+                        if failPages >= 3:
+                            print('[proxyfreeonly代理] 累计失败3页，停止该协议翻页')
+                            break
+                        continue
                     items = j.get('items', [])
                     if not items:
                         break
